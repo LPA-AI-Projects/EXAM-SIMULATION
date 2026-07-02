@@ -1,0 +1,15 @@
+{
+  "name": "cysa-plus-simulation",
+  "version": "1.0.0",
+  "description": "CompTIA CySA+ (CS0-004) exam simulation — Learners Point",
+  "private": true,
+  "scripts": {
+    "start": "serve -s ."
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "serve": "^14.2.4"
+  }
+}
