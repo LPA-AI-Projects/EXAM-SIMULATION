@@ -1,6 +1,7 @@
 'use strict';
 
 const express = require('express');
+const compression = require('compression');
 const path = require('path');
 const { createClient } = require('redis');
 
@@ -8,13 +9,14 @@ const PORT = Number(process.env.PORT) || 3000;
 const ROOT = __dirname;
 
 const app = express();
+app.use(compression());
 app.use(express.json({ limit: '6mb' }));
 
 /** @type {import('redis').RedisClientType | null} */
 let redisClient = null;
 /** @type {Map<string, string>} */
 const memoryStore = new Map();
-let useMemory = false;
+let useMemory = true;
 
 function scopePrefix(shared) {
   return shared === true || shared === 'true' ? 'shared' : 'personal';
@@ -24,8 +26,13 @@ function toRedisKey(key, shared) {
   return `storage:${scopePrefix(shared)}:${key}`;
 }
 
+function withFamily(url) {
+  if (!url || url.includes('family=')) return url;
+  return url + (url.includes('?') ? '&' : '?') + 'family=0';
+}
+
 function redisUrlFromEnv() {
-  if (process.env.REDIS_URL) return process.env.REDIS_URL;
+  if (process.env.REDIS_URL) return withFamily(process.env.REDIS_URL);
   const host = process.env.REDISHOST;
   const port = process.env.REDISPORT || '6379';
   const password = process.env.REDISPASSWORD;
@@ -34,70 +41,114 @@ function redisUrlFromEnv() {
   const auth = password
     ? `${encodeURIComponent(user || 'default')}:${encodeURIComponent(password)}@`
     : '';
-  return `redis://${auth}${host}:${port}`;
+  return withFamily(`redis://${auth}${host}:${port}`);
 }
 
-async function connectRedis() {
+function redisReady() {
+  return redisClient && redisClient.isOpen;
+}
+
+async function connectRedis(attempt) {
+  attempt = attempt || 1;
+  const maxAttempts = 8;
   const url = redisUrlFromEnv();
+
   if (!url) {
     useMemory = true;
-    console.warn('[storage] REDIS_URL not set — using in-memory store (single instance / local dev only)');
+    console.warn('[storage] no Redis config — using in-memory store');
     return;
+  }
+
+  if (redisClient) {
+    try { await redisClient.quit(); } catch (_) { /* ignore */ }
+    redisClient = null;
   }
 
   const client = createClient({
     url,
     socket: {
-      connectTimeout: 5000,
-      reconnectStrategy: (retries) => Math.min(retries * 200, 3000)
+      family: 0,
+      connectTimeout: 10000,
+      reconnectStrategy: (retries) => {
+        if (retries > 20) return new Error('Redis reconnect limit reached');
+        return Math.min(retries * 300, 3000);
+      }
     }
   });
-  client.on('error', (err) => console.error('[redis]', err.message || err));
+
+  client.on('error', (err) => {
+    console.error('[redis] error:', err.message || err);
+  });
+
+  client.on('end', () => {
+    console.warn('[redis] connection closed — using in-memory store until reconnected');
+    useMemory = true;
+  });
+
+  client.on('ready', () => {
+    useMemory = false;
+    console.log('[redis] ready');
+  });
 
   try {
     await Promise.race([
       client.connect(),
       new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Redis connect timeout')), 8000)
+        setTimeout(() => reject(new Error('Redis connect timeout')), 12000)
       )
     ]);
     redisClient = client;
     useMemory = false;
     console.log('[redis] connected');
   } catch (err) {
-    console.error('[redis] connection failed — falling back to in-memory store:', err.message || err);
+    console.error(`[redis] connect attempt ${attempt}/${maxAttempts} failed:`, err.message || err);
     try { await client.quit(); } catch (_) { /* ignore */ }
     redisClient = null;
     useMemory = true;
+    if (attempt < maxAttempts) {
+      const delay = Math.min(attempt * 2000, 10000);
+      await new Promise((r) => setTimeout(r, delay));
+      return connectRedis(attempt + 1);
+    }
+    console.error('[redis] giving up — in-memory store active (live sync will not persist)');
   }
+}
+
+async function withRedis(fn, fallback) {
+  if (redisReady()) {
+    try {
+      return await fn(redisClient);
+    } catch (err) {
+      console.error('[redis] op failed, falling back to memory:', err.message || err);
+      useMemory = true;
+    }
+  }
+  return fallback();
 }
 
 async function storageGet(key, shared) {
   const rkey = toRedisKey(key, shared);
-  if (useMemory) {
-    if (!memoryStore.has(rkey)) return null;
-    return memoryStore.get(rkey);
-  }
-  return redisClient.get(rkey);
+  return withRedis(
+    (client) => client.get(rkey),
+    () => (memoryStore.has(rkey) ? memoryStore.get(rkey) : null)
+  );
 }
 
 async function storageSet(key, value, shared) {
   const rkey = toRedisKey(key, shared);
   const str = value == null ? '' : String(value);
-  if (useMemory) {
-    memoryStore.set(rkey, str);
-    return;
-  }
-  await redisClient.set(rkey, str);
+  return withRedis(
+    (client) => client.set(rkey, str),
+    () => { memoryStore.set(rkey, str); }
+  );
 }
 
 async function storageDelete(key, shared) {
   const rkey = toRedisKey(key, shared);
-  if (useMemory) {
-    const deleted = memoryStore.delete(rkey);
-    return deleted ? 1 : 0;
-  }
-  return redisClient.del(rkey);
+  return withRedis(
+    (client) => client.del(rkey),
+    () => (memoryStore.delete(rkey) ? 1 : 0)
+  );
 }
 
 async function storageList(prefix, shared) {
@@ -105,25 +156,25 @@ async function storageList(prefix, shared) {
   const stripLen = `storage:${scopePrefix(shared)}:`.length;
   const pattern = base + '*';
 
-  if (useMemory) {
-    const keys = [];
-    for (const rkey of memoryStore.keys()) {
-      if (rkey.startsWith(base)) keys.push(rkey.slice(stripLen));
+  return withRedis(
+    async (client) => {
+      const keys = [];
+      let cursor = 0;
+      do {
+        const reply = await client.scan(cursor, { MATCH: pattern, COUNT: 200 });
+        cursor = reply.cursor;
+        for (const rkey of reply.keys) keys.push(rkey.slice(stripLen));
+      } while (cursor !== 0);
+      return keys.sort();
+    },
+    () => {
+      const keys = [];
+      for (const rkey of memoryStore.keys()) {
+        if (rkey.startsWith(base)) keys.push(rkey.slice(stripLen));
+      }
+      return keys.sort();
     }
-    return keys.sort();
-  }
-
-  const keys = [];
-  let cursor = 0;
-  do {
-    const reply = await redisClient.scan(cursor, { MATCH: pattern, COUNT: 200 });
-    cursor = reply.cursor;
-    for (const rkey of reply.keys) {
-      keys.push(rkey.slice(stripLen));
-    }
-  } while (cursor !== 0);
-
-  return keys.sort();
+  );
 }
 
 function parseShared(query) {
@@ -131,7 +182,11 @@ function parseShared(query) {
 }
 
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, storage: useMemory ? 'memory' : 'redis' });
+  res.json({
+    ok: true,
+    uptime: Math.floor(process.uptime()),
+    storage: redisReady() ? 'redis' : 'memory'
+  });
 });
 
 app.get('/api/storage/list', async (req, res) => {
@@ -191,26 +246,30 @@ app.delete('/api/storage/:key', async (req, res) => {
   }
 });
 
-app.use(express.static(ROOT, { index: 'index.html' }));
+app.use(express.static(ROOT, { index: 'index.html', maxAge: '1h' }));
 
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/')) return next();
   res.sendFile(path.join(ROOT, 'index.html'));
 });
 
+process.on('uncaughtException', (err) => {
+  console.error('[process] uncaughtException:', err);
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('[process] unhandledRejection:', err);
+});
+
 function start() {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[server] listening on 0.0.0.0:${PORT} (storage: ${useMemory ? 'memory' : 'redis'})`);
+    console.log(`[server] listening on 0.0.0.0:${PORT}`);
   });
-  connectRedis()
-    .then(() => {
-      console.log(`[server] storage ready (${useMemory ? 'memory' : 'redis'})`);
-    })
-    .catch((err) => {
-      console.error('[redis] background connect error', err);
-      useMemory = true;
-      redisClient = null;
-    });
+  connectRedis().catch((err) => {
+    console.error('[redis] background connect error', err);
+    useMemory = true;
+    redisClient = null;
+  });
 }
 
 start();
