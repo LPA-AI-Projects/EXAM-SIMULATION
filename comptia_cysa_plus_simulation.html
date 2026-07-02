@@ -553,8 +553,8 @@ window.__LP_LOGO_B64__ = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcEAAAA8
     FINAL_EXAM_TOTAL_QUESTIONS: 85,
     FINAL_EXAM_DURATION_SECONDS: 165 * 60, // 165 minutes, pooled
     FINAL_EXAM_DOMAIN_SPLIT: { 1: 29, 2: 22, 3: 20, 4: 14 }, // 34/26/24/16% of 85, rounded
-    TRAINER_POLL_INTERVAL_MS: 3000,
-    WAITING_POLL_INTERVAL_MS: 2000,
+    TRAINER_POLL_INTERVAL_MS: 15000,
+    WAITING_POLL_INTERVAL_MS: 5000,
     LIVE_SYNC_DEBOUNCE_MS: 1000,
     DOMAIN_NAMES: {
       1: 'Security Operations',
@@ -2225,8 +2225,6 @@ window.__LP_LOGO_B64__ = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcEAAAA8
     header.appendChild(el('h3', {
       style: 'font-size:13px;font-weight:600;color:var(--white);'
     }, ['Registered Learners (' + learners.length + ')']));
-    header.appendChild(el('span', { class: 'label text-dim' },
-      ['Auto-refreshes every ' + Math.round(SIM.CONST.TRAINER_POLL_INTERVAL_MS/1000) + 's']));
     wrap.appendChild(header);
 
     if(!learners.length){
