@@ -4,12 +4,13 @@
   "description": "CompTIA CySA+ (CS0-004) exam simulation — Learners Point",
   "private": true,
   "scripts": {
-    "start": "serve -s ."
+    "start": "node server.js"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "serve": "^14.2.4"
+    "express": "^4.21.2",
+    "redis": "^4.7.0"
   }
 }
