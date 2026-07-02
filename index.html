@@ -109,6 +109,7 @@ html, body {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: flex-start;
   padding: 32px 20px 80px;
   scrollbar-width: thin;
   scrollbar-color: var(--border-mid) transparent;
@@ -1881,10 +1882,10 @@ window.__LP_LOGO_B64__ = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcEAAAA8
     root.innerHTML = '';
     if(attempt.passed) fireConfetti();
 
-    const stage = el('div', { class: 'scroll-stage', style:'justify-content:center;' });
+    const stage = el('div', { class: 'scroll-stage' });
     const wrap  = el('div', {
       class: 'col gap-24 max-w-sm w-full mx-auto',
-      style: 'min-height:100vh;justify-content:center;padding:48px 0;align-items:center;'
+      style: 'padding:32px 0 48px;align-items:center;'
     });
 
     wrap.appendChild(renderLogo());
@@ -1921,6 +1922,7 @@ window.__LP_LOGO_B64__ = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcEAAAA8
 
     stage.appendChild(wrap);
     root.appendChild(stage);
+    stage.scrollTop = 0;
   }
 
   // ===== FINAL RESULTS =====
