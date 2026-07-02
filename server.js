@@ -24,18 +24,52 @@ function toRedisKey(key, shared) {
   return `storage:${scopePrefix(shared)}:${key}`;
 }
 
+function redisUrlFromEnv() {
+  if (process.env.REDIS_URL) return process.env.REDIS_URL;
+  const host = process.env.REDISHOST;
+  const port = process.env.REDISPORT || '6379';
+  const password = process.env.REDISPASSWORD;
+  const user = process.env.REDISUSER;
+  if (!host) return null;
+  const auth = password
+    ? `${encodeURIComponent(user || 'default')}:${encodeURIComponent(password)}@`
+    : '';
+  return `redis://${auth}${host}:${port}`;
+}
+
 async function connectRedis() {
-  const url = process.env.REDIS_URL;
+  const url = redisUrlFromEnv();
   if (!url) {
     useMemory = true;
     console.warn('[storage] REDIS_URL not set — using in-memory store (single instance / local dev only)');
     return;
   }
 
-  redisClient = createClient({ url });
-  redisClient.on('error', (err) => console.error('[redis]', err));
-  await redisClient.connect();
-  console.log('[redis] connected');
+  const client = createClient({
+    url,
+    socket: {
+      connectTimeout: 5000,
+      reconnectStrategy: (retries) => Math.min(retries * 200, 3000)
+    }
+  });
+  client.on('error', (err) => console.error('[redis]', err.message || err));
+
+  try {
+    await Promise.race([
+      client.connect(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Redis connect timeout')), 8000)
+      )
+    ]);
+    redisClient = client;
+    useMemory = false;
+    console.log('[redis] connected');
+  } catch (err) {
+    console.error('[redis] connection failed — falling back to in-memory store:', err.message || err);
+    try { await client.quit(); } catch (_) { /* ignore */ }
+    redisClient = null;
+    useMemory = true;
+  }
 }
 
 async function storageGet(key, shared) {
@@ -164,13 +198,19 @@ app.get('*', (req, res, next) => {
   res.sendFile(path.join(ROOT, 'index.html'));
 });
 
-connectRedis()
-  .then(() => {
-    app.listen(PORT, () => {
-      console.log(`[server] listening on port ${PORT}`);
-    });
-  })
-  .catch((err) => {
-    console.error('[server] failed to start', err);
-    process.exit(1);
+function start() {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[server] listening on 0.0.0.0:${PORT} (storage: ${useMemory ? 'memory' : 'redis'})`);
   });
+  connectRedis()
+    .then(() => {
+      console.log(`[server] storage ready (${useMemory ? 'memory' : 'redis'})`);
+    })
+    .catch((err) => {
+      console.error('[redis] background connect error', err);
+      useMemory = true;
+      redisClient = null;
+    });
+}
+
+start();
