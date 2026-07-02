@@ -553,7 +553,9 @@ window.__LP_LOGO_B64__ = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcEAAAA8
     FINAL_EXAM_TOTAL_QUESTIONS: 85,
     FINAL_EXAM_DURATION_SECONDS: 165 * 60, // 165 minutes, pooled
     FINAL_EXAM_DOMAIN_SPLIT: { 1: 29, 2: 22, 3: 20, 4: 14 }, // 34/26/24/16% of 85, rounded
-    TRAINER_POLL_INTERVAL_MS: 15000,
+    TRAINER_POLL_INTERVAL_MS: 3000,
+    WAITING_POLL_INTERVAL_MS: 2000,
+    LIVE_SYNC_DEBOUNCE_MS: 1000,
     DOMAIN_NAMES: {
       1: 'Security Operations',
       2: 'Vulnerability Management',
@@ -1151,15 +1153,19 @@ window.__LP_LOGO_B64__ = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcEAAAA8
   }
 
   let _pollHandle = null;
+  async function checkSessionStart(){
+    const r = await SIM.Store.get('session:state', true);
+    if(r && r.value === 'started'){
+      if(_pollHandle){ clearInterval(_pollHandle); _pollHandle = null; }
+      renderHub(); APP.showScreen('screen-hub');
+      return true;
+    }
+    return false;
+  }
   function pollForStart(){
     if(_pollHandle) clearInterval(_pollHandle);
-    _pollHandle = setInterval(async () => {
-      const r = await SIM.Store.get('session:state', true);
-      if(r && r.value === 'started'){
-        clearInterval(_pollHandle); _pollHandle = null;
-        renderHub(); APP.showScreen('screen-hub');
-      }
-    }, 5000);
+    checkSessionStart();
+    _pollHandle = setInterval(checkSessionStart, SIM.CONST.WAITING_POLL_INTERVAL_MS);
   }
   function clearWaitingPoll(){
     if(_pollHandle){ clearInterval(_pollHandle); _pollHandle = null; }
@@ -1608,11 +1614,13 @@ window.__LP_LOGO_B64__ = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcEAAAA8
     const q  = currentQ();
     ex.answers[q.id] = { questionId: q.id, selectedIndex: idx, correctIndex: q.correctAnswer };
     renderExamScreen();
+    window.__FLOW__.scheduleLiveSync();
   }
 
   function goTo(idx){
     const ex = APP.State.activeExam;
     ex.currentIndex = idx;
+    window.__FLOW__.scheduleLiveSync();
     if(!ex.isFinalExam){ renderExamScreen(); }
     else {
       // Final exam: re-render without resetting pooled timer
@@ -1759,6 +1767,36 @@ window.__LP_LOGO_B64__ = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcEAAAA8
     return await SIM.Store.set(APP.State.learner.profileKey, JSON.stringify(APP.State.profile), true);
   }
 
+  let _liveSyncTimer = null;
+
+  function syncLiveProgress(){
+    const ex = APP.State.activeExam;
+    const profile = APP.State.profile;
+    if(!ex || !profile) return;
+    profile.currentRun = profile.currentRun || { partsCompleted: {}, currentPart: 1 };
+    profile.currentRun.liveProgress = {
+      partNumber: ex.partNumber,
+      isFinalExam: ex.isFinalExam,
+      currentIndex: ex.currentIndex,
+      totalQuestions: ex.questions.length,
+      answeredCount: Object.keys(ex.answers).length,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  function scheduleLiveSync(){
+    if(_liveSyncTimer) clearTimeout(_liveSyncTimer);
+    _liveSyncTimer = setTimeout(async () => {
+      _liveSyncTimer = null;
+      syncLiveProgress();
+      await persistProfile();
+    }, SIM.CONST.LIVE_SYNC_DEBOUNCE_MS);
+  }
+
+  function clearLiveSync(){
+    if(_liveSyncTimer){ clearTimeout(_liveSyncTimer); _liveSyncTimer = null; }
+  }
+
   // ===== STARTING A PART =====
   function startPart(pn){
     const profile  = APP.State.profile;
@@ -1784,11 +1822,14 @@ window.__LP_LOGO_B64__ = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcEAAAA8
     };
     window.__EXAM__.renderExamScreen();
     APP.showScreen('screen-exam');
+    scheduleLiveSync();
   }
 
   function saveAndExitExam(){
     window.__EXAM__.clearTimers();
     if(APP.State.activeExam && APP.State.activeExam.isFinalExam) window.__EXAM__.clearPooledTimer();
+    syncLiveProgress();
+    persistProfile();
     APP.State.activeExam = null;
     window.__HUB__.renderHub();
     APP.showScreen('screen-hub');
@@ -1825,6 +1866,7 @@ window.__LP_LOGO_B64__ = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcEAAAA8
       profile.currentRun = profile.currentRun || { runId: SIM.uid(), startedAt: new Date().toISOString(), partsCompleted: {}, currentPart: 1 };
       profile.currentRun.partsCompleted[ex.partNumber] = { score, passed, completedAt: attempt.completedAt, answeredArray: answeredArr };
       profile.currentRun.currentPart = Math.min(ex.partNumber + 1, 5);
+      if(profile.currentRun.liveProgress) delete profile.currentRun.liveProgress;
       await persistProfile();
     }
     APP.State.activeExam = null;
@@ -2065,7 +2107,8 @@ window.__LP_LOGO_B64__ = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcEAAAA8
   window.__FLOW__ = {
     handleLearnerLogin, handleTrainerLogin, logout,
     startPart, saveAndExitExam, handleExamSubmit,
-    renderPartResults, renderFinalResults, startRetake
+    renderPartResults, renderFinalResults, startRetake,
+    scheduleLiveSync, clearLiveSync
   };
 
 })();
@@ -2202,8 +2245,16 @@ window.__LP_LOGO_B64__ = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcEAAAA8
     const tbody = el('tbody');
     learners.forEach(lrn => {
       const pc = (lrn.currentRun && lrn.currentRun.partsCompleted) || {};
+      const live = lrn.currentRun && lrn.currentRun.liveProgress;
       const nd = Object.keys(pc).length;
-      const status = nd === 0 ? 'Not started' : nd < 5 ? 'In progress (' + nd + '/5)' : 'All parts done';
+      let status;
+      if(live && live.updatedAt){
+        const partLabel = live.isFinalExam ? 'Final' : 'Part ' + live.partNumber;
+        status = partLabel + ' · Q' + (live.currentIndex + 1) + '/' + live.totalQuestions
+          + ' · ' + live.answeredCount + ' answered';
+      } else {
+        status = nd === 0 ? 'Not started' : nd < 5 ? 'In progress (' + nd + '/5)' : 'All parts done';
+      }
       const finals = (lrn.attempts || []).filter(a => a.isFinalExam);
       const last   = finals.length ? finals[finals.length - 1] : null;
       const badge  = last ? SIM.badgeForScore(last.score).label : '—';
