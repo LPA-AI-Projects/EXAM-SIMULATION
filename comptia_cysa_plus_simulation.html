@@ -2166,8 +2166,9 @@ window.__LP_LOGO_B64__ = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcEAAAA8
 
     const startBtn = el('button', { class: 'btn btn-primary btn-sm', onclick: startSession }, ['▶ Start Session']);
     const resetBtn = el('button', { class: 'btn btn-ghost btn-sm', onclick: resetSession }, ['↺ Reset Session']);
+    const clearBtn = el('button', { class: 'btn btn-ghost btn-sm', onclick: clearAllParticipants }, ['✕ Clear Participants']);
     const dlBtn    = el('button', { class: 'btn btn-ghost btn-sm', onclick: downloadAnswerKey }, ['⬇ Answer Key (.docx)']);
-    [startBtn, resetBtn, dlBtn].forEach(b => ctrlBar.appendChild(b));
+    [startBtn, resetBtn, clearBtn, dlBtn].forEach(b => ctrlBar.appendChild(b));
     inner.appendChild(ctrlBar);
 
     // Learner table
@@ -2204,6 +2205,17 @@ window.__LP_LOGO_B64__ = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcEAAAA8
     if(!confirm('Reset session to waiting state? Existing learner data is not affected.')) return;
     await SIM.Store.set('session:state', 'waiting', true);
     showToast('Session reset to waiting state.');
+  }
+
+  async function clearAllParticipants(){
+    if(!confirm('Remove ALL registered participants? This cannot be undone.')) return;
+    const keys = await SIM.Store.list('learner:', true);
+    for(const k of keys) await SIM.Store.delete(k, true);
+    _detailEmail = null;
+    const detailWrap = document.getElementById('trainer-detail-wrap');
+    if(detailWrap) detailWrap.innerHTML = '';
+    await refreshTable();
+    showToast(keys.length ? ('Cleared ' + keys.length + ' participant(s).') : 'No participants to clear.');
   }
 
   async function refreshTable(){
