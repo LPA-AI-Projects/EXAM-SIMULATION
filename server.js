@@ -262,9 +262,13 @@ process.on('unhandledRejection', (err) => {
 });
 
 function start() {
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[server] listening on 0.0.0.0:${PORT}`);
+    console.log(`[server] health check: GET /health`);
+    console.log(`[server] Railway target port must be ${PORT} (Settings → Networking)`);
   });
+  server.keepAliveTimeout = 65000;
+  server.headersTimeout = 66000;
   connectRedis().catch((err) => {
     console.error('[redis] background connect error', err);
     useMemory = true;
